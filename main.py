@@ -1,8 +1,5 @@
-from fastapi import FastAPI
+"""根入口，兼容 `uvicorn main:app`。实际装配见 app.main。"""
 
-app = FastAPI()
+from app.main import app
 
-
-@app.get("/")
-def read_root():
-    return {"Hello": "World"}
+__all__ = ["app"]
