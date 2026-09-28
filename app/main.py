@@ -9,7 +9,8 @@ from fastapi import FastAPI
 
 from app.config import Settings, get_settings
 from app.errors.handlers import register_exception_handlers
-from app.request_context import RequestIDMiddleware
+from app.introspection import build_introspection_router
+from app.request_context import RequestIDLogFilter, RequestIDMiddleware
 from app.routes import router
 
 
@@ -22,6 +23,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.settings = settings
     register_exception_handlers(app, settings)
+    app.include_router(build_introspection_router(settings))
     app.include_router(router)
 
     # FastAPI 会把 Exception/500 处理器交给最外层的 ServerErrorMiddleware
@@ -42,6 +44,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     return app
 
 
+# 本地默认日志格式：显式渲染 request_id 字段（由 RequestIDLogFilter 注入到
+# 每条记录）；部署时可自行配置 handler/formatter。不覆盖已存在的 handler，
+# 避免重复输出。
+_root_logger = logging.getLogger()
+if not _root_logger.handlers:
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(
+        logging.Formatter(
+            "%(asctime)s %(levelname)s %(name)s [request_id=%(request_id)s] %(message)s"
+        )
+    )
+    # 挂在 handler 上，保证所有经过该 handler 的记录（含 uvicorn 等第三方
+    # logger 传播上来的记录）在渲染前都具备 request_id 属性，避免格式缺字段。
+    _handler.addFilter(RequestIDLogFilter())
+    _root_logger.addHandler(_handler)
 logging.getLogger("app").setLevel(logging.INFO)
 
 app = create_app()

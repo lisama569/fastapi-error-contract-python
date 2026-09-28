@@ -38,6 +38,15 @@ def test_documented_status_codes_match_runtime(client):
             409,
         ),
         ("/boom", "get", client.get("/boom"), 500),
+        ("/admin", "get", client.get("/admin"), 401),
+        (
+            "/users",
+            "post",
+            client.post(
+                "/users", content=b"x", headers={"Content-Type": "text/plain"}
+            ),
+            415,
+        ),
     ]
     for path, method, response, expected_status in checks:
         documented = {int(k) for k in paths[path][method]["responses"]}
@@ -78,3 +87,28 @@ def test_all_categories_are_documented(client):
     assert not missing, f"文档缺少分类：{missing}"
     # OpenAPI 服务可用。
     assert schema["info"]["title"]
+
+
+def test_framework_error_statuses_are_documented(client):
+    """新增框架层状态码必须在 OpenAPI 中声明统一错误信封。"""
+    schema = client.get("/openapi.json").json()
+    paths = schema["paths"]
+
+    def ref_for(path: str, method: str, status: int) -> str:
+        return paths[path][method]["responses"][str(status)]["content"][
+            "application/json"
+        ]["schema"]["$ref"]
+
+    # /admin 覆盖 401/403；POST /users 覆盖 405 由 /items 补、415 由 /users 覆盖。
+    assert {401, 403} <= {int(k) for k in paths["/admin"]["get"]["responses"]}
+    assert ref_for("/admin", "get", 401).endswith("/ErrorResponse")
+    assert ref_for("/admin", "get", 403).endswith("/ErrorResponse")
+
+    users_statuses = {int(k) for k in paths["/users"]["post"]["responses"]}
+    assert 415 in users_statuses
+    assert ref_for("/users", "post", 415).endswith("/ErrorResponse")
+
+    # 405 由路由器在方法不匹配时产生；自查端点本身必须入文档。
+    assert "/meta/error-contract" in paths
+    assert "ErrorContractView" in schema["components"]["schemas"]
+    assert "CategoryStatus" in schema["components"]["schemas"]

@@ -5,10 +5,17 @@
   可区分的 VALIDATION_* 分类；信封 code 取首个错误的来源，逐字段错误原样
   保留在 details.loc 中（含完整字段路径与列表下标）；
 - BusinessError：业务拒绝 -> BUSINESS_RULE_VIOLATION（默认 409）；
-- StarletteHTTPException：404/405 -> NOT_FOUND；其余 4xx 归 NOT_FOUND，
-  5xx 归 INTERNAL_ERROR（该服务自身不主动产生 401/403 等）；
+- StarletteHTTPException：框架层客户端错误按真实状态码映射到可区分分类——
+  404 路由不存在 -> NOT_FOUND；405 方法不允许 -> METHOD_NOT_ALLOWED；
+  401 -> UNAUTHORIZED；403 -> FORBIDDEN；415 媒体类型不支持 ->
+  UNSUPPORTED_MEDIA_TYPE；其余 4xx 归 NOT_FOUND，5xx 归 INTERNAL_ERROR；
+  对外状态码默认取这些分类的映射（默认值即真实状态），配置可单独覆盖；
 - 其它未捕获 Exception：INTERNAL_ERROR（默认 500），仅回传固定文案，
   完整堆栈只写服务端日志并带上 request_id，绝不外泄内部细节。
+
+所有失败路径都以统一结构落一条服务端日志：request_id / category / status
+（经 request_context 的日志过滤器再兜底注入同名字段），方便拿客户端回传的
+标识直接反查同一次请求。
 """
 
 import logging
@@ -23,6 +30,7 @@ from app.errors.codes import ErrorCategory
 from app.errors.exceptions import BusinessError
 from app.errors.responses import INTERNAL_ERROR_MESSAGE, build_error_response
 from app.errors.schemas import FieldError
+from app.request_context import get_request_id
 
 logger = logging.getLogger("app.errors")
 
@@ -62,14 +70,41 @@ def _to_field_errors(errors: list[dict]) -> tuple[ErrorCategory, list[FieldError
     return envelope_category, details
 
 
+def _log_failure(
+    category: ErrorCategory,
+    settings: Settings,
+    *,
+    level: int = logging.INFO,
+    detail: str = "",
+    exc_info: bool = False,
+) -> None:
+    """所有失败路径统一落一条可对账日志。
+
+    固定带上 request_id（取当前请求上下文）、最终分类 category 与实际返回
+    状态码 status；客户端凭响应中的 request_id 即可直接反查本条日志。
+    并发下 request_id 来自 contextvars，天然只属于当前请求。
+    """
+    status = settings.status_for(category)
+    request_id = get_request_id()
+    suffix = f" detail={detail}" if detail else ""
+    logger.log(
+        level,
+        "request failed request_id=%s category=%s status=%d%s",
+        request_id,
+        category.value,
+        status,
+        suffix,
+        exc_info=exc_info,
+    )
+
+
 async def business_error_handler(
     request: Request, exc: BusinessError, settings: Settings
 ) -> Response:
-    logger.info(
-        "business rejection code=%s message=%r path=%s",
-        exc.code.value,
-        exc.message,
-        request.url.path,
+    _log_failure(
+        exc.code,
+        settings,
+        detail=f"business rejection message={exc.message!r} path={request.url.path}",
     )
     return build_error_response(
         exc.code, exc.message, settings
@@ -80,11 +115,10 @@ async def validation_exception_handler(
     request: Request, exc: RequestValidationError, settings: Settings
 ) -> Response:
     category, details = _to_field_errors(exc.errors())
-    logger.info(
-        "validation failure category=%s path=%s errors=%d",
-        category.value,
-        request.url.path,
-        len(details),
+    _log_failure(
+        category,
+        settings,
+        detail=f"validation failure path={request.url.path} errors={len(details)}",
     )
     return build_error_response(
         category,
@@ -94,10 +128,13 @@ async def validation_exception_handler(
     )
 
 
-# 框架 HTTP 异常到稳定分类的确定性映射。
+# 框架 HTTP 异常真实状态码 -> 稳定分类的确定性映射。
 _HTTP_STATUS_CATEGORY: dict[int, ErrorCategory] = {
+    401: ErrorCategory.UNAUTHORIZED,
+    403: ErrorCategory.FORBIDDEN,
     404: ErrorCategory.NOT_FOUND,
-    405: ErrorCategory.NOT_FOUND,
+    405: ErrorCategory.METHOD_NOT_ALLOWED,
+    415: ErrorCategory.UNSUPPORTED_MEDIA_TYPE,
 }
 
 
@@ -111,20 +148,33 @@ async def http_exception_handler(
             if exc.status_code >= 500
             else ErrorCategory.NOT_FOUND
         )
-    # 框架自带的安全文案（如 "Not Found"）可以透出；不含堆栈或内部信息。
+    # 框架自带的安全文案（如 "Method Not Allowed"）可以透出；不含堆栈或内部信息。
     message = str(exc.detail) if exc.detail else "请求的资源不存在"
-    return build_error_response(category, message, settings)
+    # 透传框架层语义头（典型为 405 的 Allow: GET, ...），保留真实 HTTP 语义。
+    passthrough_headers = dict(getattr(exc, "headers", None) or {})
+    _log_failure(
+        category,
+        settings,
+        detail=(
+            f"framework rejection http_status={exc.status_code} "
+            f"method={request.method} path={request.url.path}"
+        ),
+    )
+    return build_error_response(
+        category, message, settings, headers=passthrough_headers
+    )
 
 
 async def unhandled_exception_handler(
     request: Request, exc: Exception, settings: Settings
 ) -> Response:
     # 完整堆栈仅落日志，并携带 request_id 便于与客户端上报的标识对账。
-    logger.exception(
-        "unhandled exception path=%s method=%s error=%s",
-        request.url.path,
-        request.method,
-        exc,
+    _log_failure(
+        ErrorCategory.INTERNAL_ERROR,
+        settings,
+        level=logging.ERROR,
+        detail=f"unhandled exception path={request.url.path} method={request.method} error={exc}",
+        exc_info=True,
     )
     return build_error_response(
         ErrorCategory.INTERNAL_ERROR,

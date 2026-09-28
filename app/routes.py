@@ -7,9 +7,10 @@
 from typing import Annotated
 
 import anyio
-from fastapi import APIRouter, Header, Path, Query
+from fastapi import APIRouter, Depends, Header, Path, Query
 from pydantic import BaseModel, Field
 
+from app.dependencies import require_admin, require_json_content_type
 from app.errors.schemas import ErrorResponse
 from app.request_context import get_request_id
 from app.services import create_user, reject_business
@@ -32,6 +33,12 @@ _BUSINESS_ERROR_RESPONSES = {
 }
 _INTERNAL_ERROR_RESPONSES = {
     500: {"model": ErrorResponse, "description": "未处理异常（INTERNAL_ERROR，不泄露细节）"},
+}
+_FRAMEWORK_CLIENT_ERROR_RESPONSES = {
+    405: {"model": ErrorResponse, "description": "请求方式与地址不匹配（METHOD_NOT_ALLOWED）"},
+    401: {"model": ErrorResponse, "description": "缺少/无效身份凭证（UNAUTHORIZED）"},
+    403: {"model": ErrorResponse, "description": "访问被拒绝（FORBIDDEN）"},
+    415: {"model": ErrorResponse, "description": "请求体媒体类型不被支持（UNSUPPORTED_MEDIA_TYPE）"},
 }
 
 
@@ -77,12 +84,26 @@ def get_item(
 @router.post(
     "/users",
     response_model=UserView,
-    responses={**_VALIDATION_ERROR_RESPONSES, **_BUSINESS_ERROR_RESPONSES},
+    responses={**_VALIDATION_ERROR_RESPONSES, **_BUSINESS_ERROR_RESPONSES,
+               **_FRAMEWORK_CLIENT_ERROR_RESPONSES, },
+    dependencies=[Depends(require_json_content_type)],
 )
 def post_user(payload: UserCreate) -> UserView:
-    """演示请求体校验 + 业务拒绝。"""
+    """演示请求体校验 + 业务拒绝 + 415 媒体类型守卫。"""
     user = create_user(payload.name, payload.age)
     return UserView(**user)  # type: ignore[arg-type]
+
+
+@router.get(
+    "/admin",
+    response_model=dict[str, str],
+    responses={**_FRAMEWORK_CLIENT_ERROR_RESPONSES},
+)
+def admin_panel(
+    _: None = Depends(require_admin),
+) -> dict[str, str]:
+    """演示 401（缺凭证/坏凭证）与 403（普通身份无权）两条框架层拒绝路径。"""
+    return {"status": "ok", "area": "admin"}
 
 
 @router.post(

@@ -26,6 +26,11 @@ DEFAULT_STATUS_MAP: dict[ErrorCategory, int] = {
     ErrorCategory.VALIDATION_HEADER: 422,
     ErrorCategory.BUSINESS_RULE_VIOLATION: 409,
     ErrorCategory.NOT_FOUND: 404,
+    # 框架层客户端错误：默认状态码即框架给出的真实客户端错误状态。
+    ErrorCategory.METHOD_NOT_ALLOWED: 405,
+    ErrorCategory.UNAUTHORIZED: 401,
+    ErrorCategory.FORBIDDEN: 403,
+    ErrorCategory.UNSUPPORTED_MEDIA_TYPE: 415,
     ErrorCategory.INTERNAL_ERROR: 500,
 }
 
@@ -87,8 +92,16 @@ class Settings:
         object.__setattr__(self, "request_id_header", header)
 
     def status_for(self, category: ErrorCategory) -> int:
-        """返回某分类对应的 HTTP 状态码。"""
+        """返回某分类当前生效的 HTTP 状态码。"""
         return self.status_map[category]
+
+    def is_overridden(self, category: ErrorCategory) -> bool:
+        """该分类的生效状态码是否相对内置默认值被本地配置覆盖。"""
+        return self.status_map[category] != DEFAULT_STATUS_MAP[category]
+
+    def overridden_categories(self) -> list[ErrorCategory]:
+        """所有被本地配置覆盖的分类（按枚举声明顺序），供运行时自查。"""
+        return [c for c in ErrorCategory if self.is_overridden(c)]
 
 
 def build_settings(
