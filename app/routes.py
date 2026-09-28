@@ -7,11 +7,12 @@
 from typing import Annotated
 
 import anyio
-from fastapi import APIRouter, Header, Path, Query
+from fastapi import APIRouter, Depends, Header, Path, Query
 from pydantic import BaseModel, Field
 
 from app.errors.schemas import ErrorResponse
 from app.request_context import get_request_id
+from app.security import require_admin_role, require_json_content_type
 from app.services import create_user, reject_business
 
 router = APIRouter(tags=["demo"])
@@ -22,7 +23,10 @@ _ERROR_REF = {"$ref": "#/components/schemas/ErrorResponse"}
 # 各路由按其实际可能返回的状态码声明错误响应（状态码仅是默认映射，
 # 可通过配置覆盖；文档展示默认值）。
 _COMMON_ERROR_RESPONSES = {
-    404: {"model": ErrorResponse, "description": "路由不存在等资源错误"},
+    404: {"model": ErrorResponse, "description": "业务资源不存在（NOT_FOUND）"},
+}
+_METHOD_NOT_ALLOWED_RESPONSES = {
+    405: {"model": ErrorResponse, "description": "请求方式与地址不匹配（METHOD_NOT_ALLOWED）"},
 }
 _VALIDATION_ERROR_RESPONSES = {
     422: {"model": ErrorResponse, "description": "请求校验失败（VALIDATION_*）"},
@@ -32,6 +36,15 @@ _BUSINESS_ERROR_RESPONSES = {
 }
 _INTERNAL_ERROR_RESPONSES = {
     500: {"model": ErrorResponse, "description": "未处理异常（INTERNAL_ERROR，不泄露细节）"},
+}
+_UNAUTHENTICATED_RESPONSES = {
+    401: {"model": ErrorResponse, "description": "缺少身份凭据（UNAUTHENTICATED）"},
+}
+_ACCESS_DENIED_RESPONSES = {
+    403: {"model": ErrorResponse, "description": "访问被拒绝（ACCESS_DENIED）"},
+}
+_UNSUPPORTED_MEDIA_TYPE_RESPONSES = {
+    415: {"model": ErrorResponse, "description": "请求体媒体类型不支持（UNSUPPORTED_MEDIA_TYPE）"},
 }
 
 
@@ -63,7 +76,11 @@ async def echo(delay_ms: int = 0) -> dict[str, str]:
 @router.get(
     "/items/{item_id}",
     response_model=dict[str, object],
-    responses={**_COMMON_ERROR_RESPONSES, **_VALIDATION_ERROR_RESPONSES},
+    responses={
+        **_COMMON_ERROR_RESPONSES,
+        **_VALIDATION_ERROR_RESPONSES,
+        **_METHOD_NOT_ALLOWED_RESPONSES,
+    },
 )
 def get_item(
     item_id: Annotated[int, Path(ge=1, description="路径参数：正整数 ID")],
@@ -77,10 +94,15 @@ def get_item(
 @router.post(
     "/users",
     response_model=UserView,
-    responses={**_VALIDATION_ERROR_RESPONSES, **_BUSINESS_ERROR_RESPONSES},
+    dependencies=[Depends(require_json_content_type)],
+    responses={
+        **_VALIDATION_ERROR_RESPONSES,
+        **_BUSINESS_ERROR_RESPONSES,
+        **_UNSUPPORTED_MEDIA_TYPE_RESPONSES,
+    },
 )
 def post_user(payload: UserCreate) -> UserView:
-    """演示请求体校验 + 业务拒绝。"""
+    """演示请求体校验 + 业务拒绝；非 JSON 请求体在进业务前被 415 挡下。"""
     user = create_user(payload.name, payload.age)
     return UserView(**user)  # type: ignore[arg-type]
 
@@ -100,13 +122,37 @@ def business_reject(
 
 @router.get(
     "/boom",
-    responses={**_INTERNAL_ERROR_RESPONSES},
+    responses={
+        **_INTERNAL_ERROR_RESPONSES,
+        **_VALIDATION_ERROR_RESPONSES,
+        **_METHOD_NOT_ALLOWED_RESPONSES,
+    },
 )
-def boom(
+async def boom(
     x_trace: Annotated[
         str | None,
         Header(min_length=4, alias="X-Trace"),
     ] = None,
+    delay_ms: Annotated[int, Query(ge=0, le=10_000)] = 0,
 ) -> dict[str, str]:
-    """演示请求头校验失败与未处理异常两条路径。"""
+    """演示请求头校验失败与未处理异常两条路径。
+
+    delay_ms 用于并发压测：让在途 500 请求真正重叠，验证日志不串号。
+    """
+    if delay_ms:
+        await anyio.sleep(delay_ms / 1000)
     raise RuntimeError("intentional failure for contract verification")
+
+
+@router.get(
+    "/admin",
+    response_model=dict[str, str],
+    dependencies=[Depends(require_admin_role)],
+    responses={
+        **_UNAUTHENTICATED_RESPONSES,
+        **_ACCESS_DENIED_RESPONSES,
+    },
+)
+def admin_only() -> dict[str, str]:
+    """框架层访问守卫演示：缺 X-User-Role -> 401；非 admin -> 403。"""
+    return {"status": "ok", "scope": "admin"}

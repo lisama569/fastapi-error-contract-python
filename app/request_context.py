@@ -7,13 +7,16 @@
 - 客户端标识格式非法或与在途请求重复（并发串扰信号）时，**不静默复用**，
   替换为新生成的标识，响应头 ``X-Request-ID-Warning`` 给出原因
   （``invalid`` / ``duplicate-in-flight``），同时记录 warning 日志；
-- 标识存于 contextvars，每个请求拥有独立上下文，协程并发下互不串扰。
+- 标识存于 contextvars，每个请求拥有独立上下文，协程并发下互不串扰；
+- 所有 ``app.*`` 日志经 RequestIDLogFilter 自动带上当前请求标识，
+  失败日志可凭客户端给出的标识直接反查。
 """
 
 import contextvars
 import logging
 import re
 import uuid
+from collections.abc import Callable
 
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
@@ -21,6 +24,14 @@ logger = logging.getLogger("app.request_id")
 
 _request_id_var: contextvars.ContextVar[str] = contextvars.ContextVar(
     "request_id", default=""
+)
+
+# 最终使用的标识来源（client/generated）与告警原因，仅用于日志对账。
+_request_id_source_var: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "request_id_source", default=""
+)
+_request_id_warning_var: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "request_id_warning", default=""
 )
 
 # 允许的客户端标识：字母数字及 . _ : -，长度 1..128。
@@ -78,33 +89,44 @@ class RequestIDMiddleware:
             request_id = self._id_factory()
             source = SOURCE_GENERATED
             warning = WARNING_MISSING
-            logger.info("request id missing; generated=%s", request_id)
         elif not is_valid_request_id(raw):
             request_id = self._id_factory()
             source = SOURCE_GENERATED
             warning = WARNING_INVALID
-            logger.warning(
-                "rejecting malformed request id %r; generated=%s",
-                raw,
-                request_id,
-            )
         else:
             request_id = raw
 
         # 在途集合登记（生成的标识也要保证唯一）。并发重复 -> 替换并告警。
         async with self._lock:
-            if request_id in self._active:
-                logger.warning(
-                    "duplicate in-flight request id detected %r; replacing",
-                    request_id,
-                )
+            duplicated = request_id in self._active
+            if duplicated:
                 request_id = self._id_factory()
                 source = SOURCE_GENERATED
                 warning = WARNING_DUPLICATE
             self._active.add(request_id)
 
+        # 先设置当前请求的日志上下文，再写标识相关日志，保证这些日志也能
+        # 凭最终标识被反查到；contextvars 保证并发下互不串扰。
         token = _request_id_var.set(request_id)
+        source_token = _request_id_source_var.set(source)
+        warning_token = _request_id_warning_var.set(warning or "")
         try:
+            if raw is None:
+                logger.info(
+                    "request id missing; generated=%s request_id=%s",
+                    request_id, request_id,
+                )
+            elif warning == WARNING_INVALID:
+                logger.warning(
+                    "rejecting malformed request id %r; generated=%s request_id=%s",
+                    raw, request_id, request_id,
+                )
+            elif duplicated:
+                logger.warning(
+                    "duplicate in-flight request id detected %r; "
+                    "replaced=%s request_id=%s",
+                    raw, request_id, request_id,
+                )
             await self.app(
                 scope,
                 receive,
@@ -113,6 +135,8 @@ class RequestIDMiddleware:
         finally:
             async with self._lock:
                 self._active.discard(request_id)
+            _request_id_warning_var.reset(warning_token)
+            _request_id_source_var.reset(source_token)
             _request_id_var.reset(token)
 
     def _read_header(self, scope: Scope) -> str | None:
@@ -148,3 +172,18 @@ class _DummyLock:
 
     async def __aexit__(self, *exc: object) -> None:
         return None
+
+
+class RequestIDLogFilter(logging.Filter):
+    """给每条日志注入当前请求的 request_id / source / warning。
+
+    取值来自 contextvars：在请求上下文外（如启动期日志）注入 "-"，
+    在请求上下文内每个协程只看到自己的标识，并发压测下不会串号。
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        rid = _request_id_var.get()
+        record.request_id = rid or "-"
+        record.request_id_source = _request_id_source_var.get() or "-"
+        record.request_id_warning = _request_id_warning_var.get() or "-"
+        return True

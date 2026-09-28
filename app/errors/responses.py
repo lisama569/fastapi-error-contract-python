@@ -19,8 +19,13 @@ def build_error_response(
     settings: Settings,
     *,
     details: list[FieldError] | None = None,
+    status_code: int | None = None,
 ) -> JSONResponse:
-    """构造统一结构的 JSONResponse，状态码取自可配置映射。"""
+    """构造统一结构的 JSONResponse。
+
+    status_code 为 None 时取分类在配置中的状态码；框架层拒绝（如真实 405/415）
+    可显式传入真实状态码，保证“未配置覆盖时保留框架真实客户端错误状态”。
+    """
     request_id = get_request_id()
     if not request_id:
         # 理论上中间件总会设置；兜底保证错误体永远携带非空标识。
@@ -32,6 +37,7 @@ def build_error_response(
         details=details,
     )
     return JSONResponse(
-        status_code=settings.status_for(code),
+        status_code=status_code if status_code is not None
+        else settings.status_for(code),
         content=payload.model_dump(mode="json"),
     )

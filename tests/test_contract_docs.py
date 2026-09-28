@@ -38,6 +38,23 @@ def test_documented_status_codes_match_runtime(client):
             409,
         ),
         ("/boom", "get", client.get("/boom"), 500),
+        # 框架层客户端拒绝：真实状态保留 + 文档声明默认状态一致。
+        (
+            "/users",
+            "post",
+            client.post(
+                "/users", content=b"{}",
+                headers={"content-type": "text/plain"},
+            ),
+            415,
+        ),
+        ("/admin", "get", client.get("/admin"), 401),
+        (
+            "/admin",
+            "get",
+            client.get("/admin", headers={"X-User-Role": "guest"}),
+            403,
+        ),
     ]
     for path, method, response, expected_status in checks:
         documented = {int(k) for k in paths[path][method]["responses"]}

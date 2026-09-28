@@ -26,6 +26,13 @@ DEFAULT_STATUS_MAP: dict[ErrorCategory, int] = {
     ErrorCategory.VALIDATION_HEADER: 422,
     ErrorCategory.BUSINESS_RULE_VIOLATION: 409,
     ErrorCategory.NOT_FOUND: 404,
+    # 框架层客户端拒绝：默认状态码即该类拒绝的“真实状态码”，
+    # 未配置覆盖时响应状态与框架语义保持一致。
+    ErrorCategory.ROUTE_NOT_FOUND: 404,
+    ErrorCategory.METHOD_NOT_ALLOWED: 405,
+    ErrorCategory.UNAUTHENTICATED: 401,
+    ErrorCategory.ACCESS_DENIED: 403,
+    ErrorCategory.UNSUPPORTED_MEDIA_TYPE: 415,
     ErrorCategory.INTERNAL_ERROR: 500,
 }
 
@@ -70,6 +77,10 @@ class Settings:
         default_factory=lambda: dict(DEFAULT_STATUS_MAP)
     )
     request_id_header: str = DEFAULT_REQUEST_ID_HEADER
+    # 生效值 != 内置默认值的分类；init=False，仅在规范化阶段推导。
+    overrides: Mapping[ErrorCategory, int] = field(
+        default_factory=dict, init=False, compare=False, repr=False
+    )
 
     def __post_init__(self) -> None:
         # dataclass(frozen=True) 下用 object.__setattr__ 完成规范化。
@@ -83,12 +94,31 @@ class Settings:
         header = (self.request_id_header or "").strip()
         if not header:
             raise ValueError("request_id_header 不能为空")
+        # 覆盖集：生效值与内置默认值不同的分类（环境变量或显式入参造成）。
+        # 自查端点据此标识“哪些被本地配置覆盖过”。
+        overridden = {
+            c: s for c, s in normalized.items()
+            if s != DEFAULT_STATUS_MAP[c]
+        }
         object.__setattr__(self, "status_map", normalized)
+        object.__setattr__(self, "overrides", overridden)
         object.__setattr__(self, "request_id_header", header)
 
     def status_for(self, category: ErrorCategory) -> int:
         """返回某分类对应的 HTTP 状态码。"""
         return self.status_map[category]
+
+    def default_status_for(self, category: ErrorCategory) -> int:
+        """返回某分类的内置默认状态码（忽略本地覆盖）。"""
+        return DEFAULT_STATUS_MAP[category]
+
+    def is_overridden(self, category: ErrorCategory) -> bool:
+        """某分类是否被本地配置覆盖（生效值 != 内置默认值）。"""
+        return category in self.overrides
+
+    def overridden_categories(self) -> tuple[ErrorCategory, ...]:
+        """按枚举声明顺序返回被覆盖的分类，保证自查输出稳定可读。"""
+        return tuple(c for c in ErrorCategory if c in self.overrides)
 
 
 def build_settings(

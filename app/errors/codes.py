@@ -16,8 +16,20 @@ class ErrorCategory(str, Enum):
     # ---- 业务拒绝（HTTP 409 默认） ----
     BUSINESS_RULE_VIOLATION = "BUSINESS_RULE_VIOLATION"
 
-    # ---- 未找到（HTTP 404 默认） ----
+    # ---- 业务资源未找到（HTTP 404 默认） ----
     NOT_FOUND = "NOT_FOUND"
+
+    # ---- 框架层客户端拒绝（请求未进入业务代码即被挡下） ----
+    # 路由地址不存在（HTTP 404 默认，保留真实状态）
+    ROUTE_NOT_FOUND = "ROUTE_NOT_FOUND"
+    # 请求方式与地址不匹配（HTTP 405 默认，保留真实状态）
+    METHOD_NOT_ALLOWED = "METHOD_NOT_ALLOWED"
+    # 未认证/缺少身份凭据（HTTP 401 默认，保留真实状态）
+    UNAUTHENTICATED = "UNAUTHENTICATED"
+    # 已认证但访问被拒绝（HTTP 403 默认，保留真实状态）
+    ACCESS_DENIED = "ACCESS_DENIED"
+    # 请求体格式（媒体类型）不被支持（HTTP 415 默认，保留真实状态）
+    UNSUPPORTED_MEDIA_TYPE = "UNSUPPORTED_MEDIA_TYPE"
 
     # ---- 未处理异常（HTTP 500，不泄露细节） ----
     INTERNAL_ERROR = "INTERNAL_ERROR"
