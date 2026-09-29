@@ -1,7 +1,9 @@
 """框架层客户端错误（未进入业务代码即被挡下）：分类可区分、真实状态保留。
 
-覆盖：路由不存在 404、方法不允许 405、未认证 401、访问被拒 403、
-请求体格式不支持 415。状态码默认必须保留框架给出的真实值，分类稳定不变。
+覆盖：路由地址不存在 404（ROUTE_NOT_FOUND，独立于业务 NOT_FOUND）、
+方法不允许 405、未认证 401、访问被拒 403、请求体格式不支持 415、
+其它框架层 4xx（413 -> CLIENT_ERROR，保留真实状态）。
+状态码默认必须保留框架给出的真实值，分类稳定不变。
 """
 
 import pytest
@@ -25,11 +27,24 @@ def _assert_envelope(response, expected_code: str, expected_status: int) -> dict
     return body
 
 
-def test_route_not_found_keeps_not_found_and_404(client):
+def test_route_not_found_has_own_category_and_keeps_404(client):
     response = client.get("/no-such-path")
-    body = _assert_envelope(response, "NOT_FOUND", 404)
-    log_case("路由不存在", "/no-such-path", code=body["code"],
+    body = _assert_envelope(response, "ROUTE_NOT_FOUND", 404)
+    log_case("路由地址不存在", "/no-such-path", code=body["code"],
              request_id=body["request_id"], status=404)
+
+
+def test_route_not_found_distinct_from_business_not_found(client):
+    """框架层“地址不存在”与业务“没查到这条数据”必须各算各的。"""
+    route_miss = client.get("/no-such-path")
+    business_miss = client.get("/users/999999")
+    route_body = _assert_envelope(route_miss, "ROUTE_NOT_FOUND", 404)
+    business_body = _assert_envelope(business_miss, "NOT_FOUND", 404)
+    log_case("两类不存在对比", ["/no-such-path", "/users/999999"],
+             code=f"{route_body['code']} vs {business_body['code']}",
+             request_id=route_body["request_id"], status=404)
+    # 只凭分类即可区分：地址写错了 vs 业务上确实没有。
+    assert route_body["code"] != business_body["code"]
 
 
 def test_method_not_allowed_is_distinct_and_keeps_405(client):
@@ -109,10 +124,22 @@ def test_json_content_type_still_passes_media_guard(client):
     assert response.status_code == 200
 
 
+def test_oversized_payload_is_client_error_and_keeps_413(client):
+    """其它框架层 4xx 归 CLIENT_ERROR，默认保留框架真实状态（413）。"""
+    response = client.post(
+        "/users", json={"name": "x" * (1024 * 1024), "age": 1}
+    )
+    body = _assert_envelope(response, "CLIENT_ERROR", 413)
+    log_case("请求体过大", "POST /users >1MB", code=body["code"],
+             request_id=body["request_id"], status=413)
+    # 兜底分类与“资源不存在”等既有分类都能区分。
+    assert body["code"] != client.get("/no-such-path").json()["code"]
+
+
 @pytest.mark.parametrize(
     "method,url,expected_code,expected_status",
     [
-        ("GET", "/no-such-path", "NOT_FOUND", 404),
+        ("GET", "/no-such-path", "ROUTE_NOT_FOUND", 404),
         ("POST", "/items/1", "METHOD_NOT_ALLOWED", 405),
         ("GET", "/admin", "UNAUTHORIZED", 401),
     ],

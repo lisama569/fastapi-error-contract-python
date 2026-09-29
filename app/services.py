@@ -26,3 +26,21 @@ def reject_business(resource: str, reason: str) -> None:
         f"操作被业务规则拒绝：{resource}（{reason}）",
         code=ErrorCategory.BUSINESS_RULE_VIOLATION,
     )
+
+
+# 演示用内存数据：只有这些 ID “查得到”。
+_KNOWN_USER_IDS = {1}
+
+
+def get_user(user_id: int) -> dict[str, int | str]:
+    """按 ID 查用户的示例业务；查不到 -> 业务 NOT_FOUND（404）。
+
+    与框架层“路由地址不存在”（ROUTE_NOT_FOUND）是两类不同语义：
+    地址合法、业务上确实没有这条数据时才走这里。
+    """
+    if user_id not in _KNOWN_USER_IDS:
+        raise BusinessError(
+            f"用户不存在：id={user_id}",
+            code=ErrorCategory.NOT_FOUND,
+        )
+    return {"id": user_id, "name": "demo-user", "age": 1}

@@ -62,12 +62,16 @@ def test_framework_rejection_log_carries_tracking_fields(client, caplog):
             content=b"x",
             headers={"Content-Type": "text/plain"},
         )
+        r413 = client.post(
+            "/users", json={"name": "x" * (1024 * 1024), "age": 1}
+        )
     expected = [
-        (r404, "NOT_FOUND", 404),
+        (r404, "ROUTE_NOT_FOUND", 404),
         (r405, "METHOD_NOT_ALLOWED", 405),
         (r401, "UNAUTHORIZED", 401),
         (r403, "FORBIDDEN", 403),
         (r415, "UNSUPPORTED_MEDIA_TYPE", 415),
+        (r413, "CLIENT_ERROR", 413),
     ]
     records = _failure_records(caplog)
     assert len(records) == len(expected)
@@ -75,6 +79,34 @@ def test_framework_rejection_log_carries_tracking_fields(client, caplog):
         _assert_failure_log(
             record, response.json()["request_id"], category, status
         )
+        # 框架层拒绝的日志还要能看出框架原本给出的真实状态。
+        assert f"http_status={status}" in record.getMessage()
+
+
+def test_framework_log_shows_both_effective_and_original_status(caplog):
+    """配置覆盖某框架层分类后：日志 status 是实际返回值，detail 保留框架原值。"""
+    import logging as _logging
+
+    from fastapi.testclient import TestClient
+
+    from app.config import build_settings
+    from app.errors.codes import ErrorCategory
+    from app.main import create_app
+
+    settings = build_settings({ErrorCategory.ROUTE_NOT_FOUND: 400})
+    app = create_app(settings)
+    with TestClient(app, raise_server_exceptions=False) as c:
+        with caplog.at_level(_logging.INFO, logger="app.errors"):
+            response = c.get("/no-such-path")
+    body = response.json()
+    assert response.status_code == 400
+    assert body["code"] == "ROUTE_NOT_FOUND"
+    records = _failure_records(caplog)
+    assert len(records) == 1
+    # 日志与客户端实际收到的一致（覆盖后的 400）……
+    _assert_failure_log(records[0], body["request_id"], "ROUTE_NOT_FOUND", 400)
+    # ……同时能看出框架原本给的是 404。
+    assert "http_status=404" in records[0].getMessage()
 
 
 def test_unhandled_exception_log_carries_tracking_fields_and_stack(client, caplog):

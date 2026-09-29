@@ -68,6 +68,16 @@ async def test_concurrent_failure_logs_never_cross_wires(caplog):
         rid = f"trace-framework-{i}"
         plan.append(("METHOD_NOT_ALLOWED", "POST", "/items/1",
                      {"headers": {"X-Request-ID": rid}}))
+    # 同为 404 但分类不同的两类混在一起压：框架地址不存在 vs 业务没查到，
+    # 日志与响应都不允许把这两类串到一起。
+    for i in range(6):
+        rid = f"trace-route-miss-{i}"
+        plan.append(("ROUTE_NOT_FOUND", "GET", "/no-such-path",
+                     {"headers": {"X-Request-ID": rid}}))
+    for i in range(6):
+        rid = f"trace-biz-miss-{i}"
+        plan.append(("NOT_FOUND", "GET", "/users/999999",
+                     {"headers": {"X-Request-ID": rid}}))
     for i in range(6):
         rid = f"trace-boom-{i}"
         plan.append(("INTERNAL_ERROR", "GET", "/boom",

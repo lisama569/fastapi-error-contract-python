@@ -27,10 +27,13 @@ DEFAULT_STATUS_MAP: dict[ErrorCategory, int] = {
     ErrorCategory.BUSINESS_RULE_VIOLATION: 409,
     ErrorCategory.NOT_FOUND: 404,
     # 框架层客户端错误：默认状态码即框架给出的真实客户端错误状态。
+    ErrorCategory.ROUTE_NOT_FOUND: 404,
     ErrorCategory.METHOD_NOT_ALLOWED: 405,
     ErrorCategory.UNAUTHORIZED: 401,
     ErrorCategory.FORBIDDEN: 403,
     ErrorCategory.UNSUPPORTED_MEDIA_TYPE: 415,
+    # 兜底框架层 4xx：默认值仅作登记，未被显式覆盖时实际返回框架真实状态码。
+    ErrorCategory.CLIENT_ERROR: 400,
     ErrorCategory.INTERNAL_ERROR: 500,
 }
 

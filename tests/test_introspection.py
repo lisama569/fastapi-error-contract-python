@@ -88,7 +88,8 @@ def test_introspection_matches_openapi_and_runtime_default_requests(client):
 
     # 抽样：自查默认状态 == 实际请求状态。
     runtime = {
-        "NOT_FOUND": client.get("/no-such-path").status_code,
+        "ROUTE_NOT_FOUND": client.get("/no-such-path").status_code,
+        "NOT_FOUND": client.get("/users/999999").status_code,
         "METHOD_NOT_ALLOWED": client.post("/items/1").status_code,
         "UNAUTHORIZED": client.get("/admin").status_code,
         "UNSUPPORTED_MEDIA_TYPE": client.post(

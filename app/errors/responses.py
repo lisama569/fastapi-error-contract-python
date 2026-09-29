@@ -20,10 +20,13 @@ def build_error_response(
     *,
     details: list[FieldError] | None = None,
     headers: dict[str, str] | None = None,
+    status: int | None = None,
 ) -> JSONResponse:
-    """构造统一结构的 JSONResponse，状态码取自可配置映射。
+    """构造统一结构的 JSONResponse，状态码默认取自可配置映射。
 
     ``headers`` 用于透传框架层语义头（如 405 的 ``Allow``），不影响契约体。
+    ``status`` 供框架层处理器显式指定真实状态码（默认映射未覆盖时保留框架
+    原值）；不传则取 ``settings.status_for(code)``。
     """
     request_id = get_request_id()
     if not request_id:
@@ -36,7 +39,7 @@ def build_error_response(
         details=details,
     )
     return JSONResponse(
-        status_code=settings.status_for(code),
+        status_code=status if status is not None else settings.status_for(code),
         content=payload.model_dump(mode="json"),
         headers=headers,
     )

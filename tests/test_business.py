@@ -76,10 +76,33 @@ def test_status_code_remappable_via_config():
 
 
 def test_not_found_envelope(client):
-    response = client.get("/no-such-path")
+    """业务“没查到这条数据”：NOT_FOUND 分类与默认 404 均保持不变。"""
+    response = client.get("/users/999999")
     body = response.json()
-    log_case("资源不存在", "/no-such-path", code=body.get("code"),
+    log_case("业务资源不存在", "/users/999999", code=body.get("code"),
              request_id=body.get("request_id"), status=response.status_code)
     assert response.status_code == 404
     assert body["code"] == "NOT_FOUND"
     assert body["details"] is None
+
+
+def test_business_not_found_status_remap_does_not_leak_to_framework():
+    """把业务 NOT_FOUND 改成 400：只影响业务路径，框架层 404 保持真实状态。"""
+    settings = build_settings({ErrorCategory.NOT_FOUND: 400})
+    app = create_app(settings)
+    with TestClient(app, raise_server_exceptions=False) as c:
+        business = c.get("/users/999999")
+        route_miss = c.get("/no-such-path")
+    log_case(
+        "业务 NOT_FOUND 覆盖隔离",
+        {"NOT_FOUND": 400},
+        code=route_miss.json().get("code"),
+        request_id=route_miss.json().get("request_id"),
+        status=route_miss.status_code,
+    )
+    # 业务路径按覆盖值返回。
+    assert business.status_code == 400
+    assert business.json()["code"] == "NOT_FOUND"
+    # 框架层“地址不存在”有自己的分类与真实状态，不受业务类配置影响。
+    assert route_miss.status_code == 404
+    assert route_miss.json()["code"] == "ROUTE_NOT_FOUND"

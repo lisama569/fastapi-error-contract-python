@@ -47,6 +47,15 @@ def test_documented_status_codes_match_runtime(client):
             ),
             415,
         ),
+        # 业务“没查到数据”：文档声明的 404 与运行时一致。
+        ("/users/{user_id}", "get", client.get("/users/999999"), 404),
+        # 框架层其它 4xx（请求体过大）：文档声明的 413 与运行时一致。
+        (
+            "/users",
+            "post",
+            client.post("/users", json={"name": "x" * (1024 * 1024), "age": 1}),
+            413,
+        ),
     ]
     for path, method, response, expected_status in checks:
         documented = {int(k) for k in paths[path][method]["responses"]}

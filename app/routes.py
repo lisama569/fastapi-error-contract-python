@@ -10,10 +10,14 @@ import anyio
 from fastapi import APIRouter, Depends, Header, Path, Query
 from pydantic import BaseModel, Field
 
-from app.dependencies import require_admin, require_json_content_type
+from app.dependencies import (
+    require_admin,
+    require_json_content_type,
+    require_reasonable_payload_size,
+)
 from app.errors.schemas import ErrorResponse
 from app.request_context import get_request_id
-from app.services import create_user, reject_business
+from app.services import create_user, get_user, reject_business
 
 router = APIRouter(tags=["demo"])
 
@@ -23,7 +27,7 @@ _ERROR_REF = {"$ref": "#/components/schemas/ErrorResponse"}
 # 各路由按其实际可能返回的状态码声明错误响应（状态码仅是默认映射，
 # 可通过配置覆盖；文档展示默认值）。
 _COMMON_ERROR_RESPONSES = {
-    404: {"model": ErrorResponse, "description": "路由不存在等资源错误"},
+    404: {"model": ErrorResponse, "description": "业务资源不存在（NOT_FOUND）"},
 }
 _VALIDATION_ERROR_RESPONSES = {
     422: {"model": ErrorResponse, "description": "请求校验失败（VALIDATION_*）"},
@@ -39,6 +43,7 @@ _FRAMEWORK_CLIENT_ERROR_RESPONSES = {
     401: {"model": ErrorResponse, "description": "缺少/无效身份凭证（UNAUTHORIZED）"},
     403: {"model": ErrorResponse, "description": "访问被拒绝（FORBIDDEN）"},
     415: {"model": ErrorResponse, "description": "请求体媒体类型不被支持（UNSUPPORTED_MEDIA_TYPE）"},
+    413: {"model": ErrorResponse, "description": "请求体过大（CLIENT_ERROR，框架层其它 4xx 兜底）"},
 }
 
 
@@ -86,12 +91,27 @@ def get_item(
     response_model=UserView,
     responses={**_VALIDATION_ERROR_RESPONSES, **_BUSINESS_ERROR_RESPONSES,
                **_FRAMEWORK_CLIENT_ERROR_RESPONSES, },
-    dependencies=[Depends(require_json_content_type)],
+    dependencies=[
+        Depends(require_reasonable_payload_size),
+        Depends(require_json_content_type),
+    ],
 )
 def post_user(payload: UserCreate) -> UserView:
-    """演示请求体校验 + 业务拒绝 + 415 媒体类型守卫。"""
+    """演示请求体校验 + 业务拒绝 + 413/415 框架层守卫。"""
     user = create_user(payload.name, payload.age)
     return UserView(**user)  # type: ignore[arg-type]
+
+
+@router.get(
+    "/users/{user_id}",
+    response_model=UserView,
+    responses={**_COMMON_ERROR_RESPONSES, **_VALIDATION_ERROR_RESPONSES},
+)
+def get_user_by_id(
+    user_id: Annotated[int, Path(ge=1, description="路径参数：正整数用户 ID")],
+) -> UserView:
+    """演示业务“没查到这条数据”：NOT_FOUND（与框架层 ROUTE_NOT_FOUND 区分）。"""
+    return UserView(**get_user(user_id))  # type: ignore[arg-type]
 
 
 @router.get(

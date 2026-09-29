@@ -42,3 +42,17 @@ async def require_json_content_type(request: Request) -> None:
             status_code=415,
             detail=f"不支持的请求体媒体类型：{media_type or '未声明'}",
         )
+
+
+# 演示用请求体上限（字节）：超过即 413，演示“其它框架层 4xx”归约路径。
+_MAX_CONTENT_LENGTH = 1024 * 1024
+
+
+async def require_reasonable_payload_size(request: Request) -> None:
+    """请求体超过上限 -> 413（框架层拒绝，请求不进入业务代码）。"""
+    raw = request.headers.get("content-length")
+    if raw and raw.isdigit() and int(raw) > _MAX_CONTENT_LENGTH:
+        raise StarletteHTTPException(
+            status_code=413,
+            detail=f"请求体过大：上限 {_MAX_CONTENT_LENGTH} 字节",
+        )

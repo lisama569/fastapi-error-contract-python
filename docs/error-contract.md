@@ -48,19 +48,28 @@
 | `VALIDATION_BODY` | 请求体校验失败 | 422 | 逐字段 |
 | `VALIDATION_HEADER` | 请求头校验失败 | 422 | 逐字段 |
 | `BUSINESS_RULE_VIOLATION` | 业务规则拒绝 | 409 | `null` |
-| `NOT_FOUND` | 目标地址/资源不存在 | 404 | `null` |
+| `NOT_FOUND` | 业务上“没查到这条数据”（地址合法、数据不存在） | 404 | `null` |
+| `ROUTE_NOT_FOUND` | 路由地址不存在（框架层，请求未进入业务代码） | 404 | `null` |
 | `METHOD_NOT_ALLOWED` | 请求方式与地址不匹配（如对只读地址发 POST） | 405 | `null` |
 | `UNAUTHORIZED` | 缺少身份凭证或凭证无效（未认证） | 401 | `null` |
 | `FORBIDDEN` | 已认证但访问被拒绝（无权限） | 403 | `null` |
 | `UNSUPPORTED_MEDIA_TYPE` | 请求体格式/媒体类型不被该接口支持 | 415 | `null` |
+| `CLIENT_ERROR` | 其它框架层 4xx（如 413 请求体过大）的兜底分类 | 400* | `null` |
 | `INTERNAL_ERROR` | 未处理异常 | 500 | `null` |
 
-- `METHOD_NOT_ALLOWED` / `UNAUTHORIZED` / `FORBIDDEN` / `UNSUPPORTED_MEDIA_TYPE`
-  用于描述**请求还没进入业务代码就被框架/守卫挡下**的情况；它们与
-  `NOT_FOUND`、彼此之间分类两两不同，调用方可以只凭 `code` 区分“地址不存在”
-  “方法不对”“没登录”“没权限”“请求体格式不对”。
-- 这些框架层分类的默认状态码**保留框架给出的真实客户端错误状态**
-  （405/401/403/415），不会被统一改写成其他状态。
+\* `CLIENT_ERROR` 的 400 仅是登记的默认值；**未被显式覆盖时，实际返回框架
+给出的真实状态码**（如 413），见下文的“框架层真实状态保留”。
+
+- `ROUTE_NOT_FOUND` / `METHOD_NOT_ALLOWED` / `UNAUTHORIZED` / `FORBIDDEN` /
+  `UNSUPPORTED_MEDIA_TYPE` / `CLIENT_ERROR` 用于描述**请求还没进入业务代码
+  就被框架/守卫挡下**的情况；它们与业务分类 `NOT_FOUND`、彼此之间分类两两
+  不同，调用方只凭 `code` 即可区分“地址写错了”（`ROUTE_NOT_FOUND`）与
+  “业务上确实没有这条数据”（`NOT_FOUND`），以及“方法不对”“没登录”
+  “没权限”“请求体格式不对”“其它框架层 4xx”。
+- **框架层真实状态保留**：这些框架层分类的默认对外状态码就是框架给出的
+  真实客户端错误状态（404/405/401/403/415/413…），不会被统一改写成其他
+  状态；`CLIENT_ERROR` 兜底桶同样按次保留真实状态（如 413），而非套用它
+  登记的默认值或“资源不存在”的状态。
 - 同一次请求若有多个字段校验失败，信封 `code` 取**首个**错误的来源分类，
   所有字段错误都完整保留在 `details` 中。
 - `INTERNAL_ERROR` 对外只返回固定文案，异常类型、异常消息、堆栈、文件路径等
@@ -77,9 +86,14 @@ ERROR_STATUS__VALIDATION_BODY=400 \
 ERROR_STATUS__BUSINESS_RULE_VIOLATION=422 \
 uv run uvicorn main:app
 
-# 新增的框架层分类同样可单独覆盖（例如把 405 改成 404 对外收敛）
+# 框架层分类同样可单独覆盖（例如把 405 改成 404 对外收敛）
 ERROR_STATUS__METHOD_NOT_ALLOWED=404 \
 ERROR_STATUS__FORBIDDEN=404 \
+uv run uvicorn main:app
+
+# 业务“没查到数据”与框架“地址不存在”是两类，可各自单独调整、互不影响
+ERROR_STATUS__NOT_FOUND=400 \
+ERROR_STATUS__ROUTE_NOT_FOUND=404 \
 uv run uvicorn main:app
 ```
 
@@ -88,8 +102,19 @@ uv run uvicorn main:app
 1. **显式入参**：`create_app(build_settings({ErrorCategory.FORBIDDEN: 404}))`
    （测试 / 多实例装配时使用，优先级最高）；
 2. **环境变量**：`ERROR_STATUS__<分类名>=<状态码>`，对所有分类一视同仁，
-   包括本轮新增的框架层分类；
+   包括框架层分类；
 3. **内置默认**：`DEFAULT_STATUS_MAP`（框架层分类默认即真实客户端状态）。
+
+覆盖的影响边界（按分类隔离）：
+
+- 覆盖**只影响被覆盖的那一类**：改 `NOT_FOUND`（业务）不会影响
+  `ROUTE_NOT_FOUND`（框架）及其它框架层分类的真实状态，反之亦然；
+- 框架层分类**未被覆盖时**，对外状态码逐次保留框架给出的真实值——包括
+  `CLIENT_ERROR` 兜底桶（如 413 不会被套成登记的 400，更不会被套成
+  “资源不存在”的状态）；
+- 框架层分类**被覆盖成非默认值时**，该类的所有命中都返回覆盖值
+  （`CLIENT_ERROR` 桶内不同真实状态会统一收敛到覆盖值）；
+- 把某类覆盖成与默认值相同的值视为“未覆盖”，框架层该类仍按真实状态返回。
 
 其余约束：
 
@@ -127,7 +152,7 @@ uv run uvicorn main:app
 
 ### 3.1 失败日志对账
 
-每一类失败——校验失败、业务拒绝、框架层拒绝（404/405/401/403/415）、
+每一类失败——校验失败、业务拒绝、框架层拒绝（404/405/401/403/415/413…）、
 未处理异常——服务端都落**一条**统一结构的日志：
 
 ```text
@@ -139,7 +164,9 @@ request failed request_id=<本次请求标识> category=<最终分类> status=<�
 - 日志过滤器还会把 `request_id` 作为结构化字段注入该请求内的**所有** app 日志
   （可用 `%(request_id)s` 格式化），上下文外记为 `-`；
 - `category` 是最终错误分类，`status` 是**实际写回响应**的状态码
-  （含配置覆盖后的值）；
+  （含配置覆盖后的值），与客户端真正收到的一致；
+- 框架层拒绝的 `detail` 中另带 `http_status=<框架原始状态码>`——即使该分类
+  被配置覆盖，日志里也能同时看到实际返回状态与框架原本给出的真实状态；
 - 标识缺失 / 非法 / 并发重复时，另有一条带 `warning=...`、`rejected_value`、
   `final` 的日志，日志里就能看出最终采用了哪个标识；
 - 未处理异常以 ERROR + 完整堆栈落日志，对外仍只给固定文案；
@@ -156,6 +183,7 @@ request failed request_id=<本次请求标识> category=<最终分类> status=<�
   "categories": [
     {"code": "VALIDATION_BODY", "default_status": 422, "effective_status": 400, "overridden": true},
     {"code": "NOT_FOUND", "default_status": 404, "effective_status": 404, "overridden": false},
+    {"code": "ROUTE_NOT_FOUND", "default_status": 404, "effective_status": 404, "overridden": false},
     {"code": "METHOD_NOT_ALLOWED", "default_status": 405, "effective_status": 405, "overridden": false}
   ],
   "overridden_categories": ["VALIDATION_BODY"]
@@ -174,9 +202,12 @@ request failed request_id=<本次请求标识> category=<最终分类> status=<�
 
 - **稳定**：信封五个顶层字段及其含义、`code` 分类枚举值（只增不改不删）、
   `details[].loc` 的“来源前缀”语义、成功响应结构；
-- **本轮新增为纯增量**：新增的 4 个框架层分类、自查端点、响应头行为均不改变
-  既有分类的默认状态与成功接口；旧客户端忽略不认识的 `code` / 字段即可，
-  其对既有 `code` 与成功响应的解析完全不受影响；
+- **本轮新增为纯增量**：新增 `ROUTE_NOT_FOUND`（框架层地址不存在）与
+  `CLIENT_ERROR`（其它框架层 4xx 兜底）两个分类；既有分类的名称、默认
+  状态与语义不变——`NOT_FOUND` 仍表示“资源不存在”，默认仍是 404，
+  老客户端对既有 `code` 与成功响应的解析完全不受影响；
+  此前“地址不存在”也归 `NOT_FOUND`，本轮起改归 `ROUTE_NOT_FOUND`，
+  老客户端忽略不认识的 `code` 即可；
 - **可演进**：允许未来**新增** `code` 值、允许在响应体中**新增**可选字段，
   旧客户端应忽略不认识的字段、不应依赖字段顺序；
 - **不保证**：`message` 文案、`details[].type` 的具体校验器名（跟随
@@ -193,12 +224,15 @@ request failed request_id=<本次请求标识> category=<最终分类> status=<�
 | `POST /items/{item_id}` | `METHOD_NOT_ALLOWED`（方法与地址不匹配，405） |
 | `POST /users` | `VALIDATION_BODY` 及多字段定位 |
 | `POST /users`（`Content-Type: text/plain`） | `UNSUPPORTED_MEDIA_TYPE`（415） |
+| `POST /users`（JSON 请求体超过 1MB） | `CLIENT_ERROR`（413，框架层其它 4xx 兜底） |
+| `GET /users/1` | 业务查询成功 |
+| `GET /users/999999` | `NOT_FOUND`（业务“没查到这条数据”，404） |
 | `GET /admin` | `UNAUTHORIZED`（401，无/坏凭证） |
 | `GET /admin`（`Authorization: Bearer user-secret`） | `FORBIDDEN`（403） |
 | `GET /admin`（`Authorization: Bearer admin-secret`） | 守卫通过后的成功响应 |
 | `GET /boom`（带 `X-Trace` 头） | `VALIDATION_HEADER` |
 | `POST /business-reject` | `BUSINESS_RULE_VIOLATION` |
-| `GET /no-such-path` | `NOT_FOUND`（404） |
+| `GET /no-such-path` | `ROUTE_NOT_FOUND`（框架层地址不存在，404） |
 | `GET /boom` | `INTERNAL_ERROR`（不泄露细节） |
 | `GET /echo?delay_ms=` | 并发隔离与在途重复检测 |
 | `GET /meta/error-contract` | 只读运行时自查 |
@@ -213,7 +247,8 @@ uv sync --group dev
 uv run pytest
 
 # 只跑某一组
-uv run pytest tests/test_framework_errors.py -v   # 框架层客户端错误
+uv run pytest tests/test_framework_errors.py -v   # 框架层客户端错误（分类区分/真实状态）
+uv run pytest tests/test_config_override.py -v    # 按分类单独覆盖与影响边界
 uv run pytest tests/test_failure_logs.py -v       # 失败日志对账
 uv run pytest tests/test_introspection.py -v      # 运行时自查
 
@@ -226,7 +261,8 @@ uv run uvicorn main:app --reload
 # 手工验证各分类
 curl -i http://127.0.0.1:8000/items/not-int            # VALIDATION_PATH 422
 curl -i -X POST http://127.0.0.1:8000/items/1          # METHOD_NOT_ALLOWED 405
-curl -i http://127.0.0.1:8000/no-such-path             # NOT_FOUND 404
+curl -i http://127.0.0.1:8000/no-such-path             # ROUTE_NOT_FOUND 404（框架层）
+curl -i http://127.0.0.1:8000/users/999999             # NOT_FOUND 404（业务没查到）
 curl -i http://127.0.0.1:8000/admin                    # UNAUTHORIZED 401
 curl -i -H 'Authorization: Bearer user-secret' \
   http://127.0.0.1:8000/admin                          # FORBIDDEN 403
@@ -234,6 +270,9 @@ curl -i -X POST http://127.0.0.1:8000/users \
   -H 'Content-Type: text/plain' -d 'x'                 # UNSUPPORTED_MEDIA_TYPE 415
 curl -i -X POST http://127.0.0.1:8000/users \
   -H 'Content-Type: application/json' -d '{}'          # VALIDATION_BODY 422
+curl -i -X POST http://127.0.0.1:8000/users \
+  -H 'Content-Type: application/json' \
+  -d "{\"name\": \"$(python -c 'print("x"*1100000)')\", \"age\": 1}"  # CLIENT_ERROR 413
 curl -i -X POST http://127.0.0.1:8000/business-reject  # BUSINESS_RULE_VIOLATION 409
 curl -i http://127.0.0.1:8000/boom                     # INTERNAL_ERROR 500
 
@@ -242,11 +281,20 @@ curl -i http://127.0.0.1:8000/items/x -H 'X-Request-ID: demo-trace-1'
 # 服务端日志可见：request failed request_id=demo-trace-1 \
 #   category=VALIDATION_PATH status=422 ...
 
-# 验证状态码映射可配置 + 自查端点同步反映
-ERROR_STATUS__METHOD_NOT_ALLOWED=404 \
+# 验证“按分类单独覆盖、互不影响 + 框架层真实状态保留”
+ERROR_STATUS__NOT_FOUND=400 \
   uv run uvicorn main:app
+curl -i http://127.0.0.1:8000/users/999999   # 业务 NOT_FOUND -> 400（覆盖生效）
+curl -i http://127.0.0.1:8000/no-such-path   # 框架 ROUTE_NOT_FOUND -> 仍 404（不受影响）
 curl -s http://127.0.0.1:8000/meta/error-contract \
-  | python -m json.tool
+  | python -m json.tool                       # 自查端点同步反映覆盖情况
+
+# 覆盖框架层分类后，日志仍能看出框架原本的真实状态
+ERROR_STATUS__ROUTE_NOT_FOUND=400 \
+  uv run uvicorn main:app
+curl -i http://127.0.0.1:8000/no-such-path   # 返回 400
+# 服务端日志可见：... category=ROUTE_NOT_FOUND status=400 \
+#   detail=framework rejection http_status=404 ...
 ```
 
 测试在 stdout 打印每条用例的**输入、分类结果与追踪标识**
