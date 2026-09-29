@@ -25,14 +25,28 @@ DEFAULT_STATUS_MAP: dict[ErrorCategory, int] = {
     ErrorCategory.VALIDATION_BODY: 422,
     ErrorCategory.VALIDATION_HEADER: 422,
     ErrorCategory.BUSINESS_RULE_VIOLATION: 409,
+    # 业务侧“资源不存在”：语义/默认值与历史一致，与框架层 ROUTE_NOT_FOUND 互不影响。
     ErrorCategory.NOT_FOUND: 404,
-    # 框架层客户端错误：默认状态码即框架给出的真实客户端错误状态。
+    # 框架层客户端错误：默认状态码即框架给出的真实客户端错误状态；
+    # 每类可单独配置覆盖，覆盖一类不影响其它任何分类。
+    ErrorCategory.ROUTE_NOT_FOUND: 404,
     ErrorCategory.METHOD_NOT_ALLOWED: 405,
     ErrorCategory.UNAUTHORIZED: 401,
     ErrorCategory.FORBIDDEN: 403,
     ErrorCategory.UNSUPPORTED_MEDIA_TYPE: 415,
+    # 未知 4xx 兜底分类：DEFAULT_STATUS_MAP 中的 400 只是满足“每类必登记”的
+    # 占位值；该分类属于 PASSTHROUGH_CATEGORIES——运行时默认透传框架给出的
+    # 真实状态码（如 413 仍是 413），只有被显式配置覆盖时才统一改写，因此
+    # 绝不会被业务 NOT_FOUND 等其它分类的配置牵连。
+    ErrorCategory.CLIENT_ERROR: 400,
     ErrorCategory.INTERNAL_ERROR: 500,
 }
+
+# “状态透传”分类：没有单一固定默认状态，框架层拒绝默认保留框架给出的真实
+# 状态码；分类 -> 状态码映射仅在被本地配置显式覆盖时才生效。
+PASSTHROUGH_CATEGORIES: frozenset[ErrorCategory] = frozenset(
+    {ErrorCategory.CLIENT_ERROR}
+)
 
 _ENV_STATUS_PREFIX = "ERROR_STATUS__"
 _ENV_REQUEST_ID_HEADER = "REQUEST_ID_HEADER"
@@ -88,16 +102,35 @@ class Settings:
         header = (self.request_id_header or "").strip()
         if not header:
             raise ValueError("request_id_header 不能为空")
+        # 显式覆盖集合：
+        # - 普通分类：生效值 != 内置默认值即视为覆盖；
+        # - 透传分类（CLIENT_ERROR）：默认透传真实状态，与占位默认值是否相等
+        #   都不代表“覆盖”，因此以传入映射为基准另行判定。
+        provided = set(self.status_map)
+        overridden = {
+            category
+            for category, status in normalized.items()
+            if (
+                category in PASSTHROUGH_CATEGORIES
+                and category in provided
+                and status != DEFAULT_STATUS_MAP[category]
+            )
+            or (
+                category not in PASSTHROUGH_CATEGORIES
+                and status != DEFAULT_STATUS_MAP[category]
+            )
+        }
         object.__setattr__(self, "status_map", normalized)
         object.__setattr__(self, "request_id_header", header)
+        object.__setattr__(self, "_overridden", overridden)
 
     def status_for(self, category: ErrorCategory) -> int:
         """返回某分类当前生效的 HTTP 状态码。"""
         return self.status_map[category]
 
     def is_overridden(self, category: ErrorCategory) -> bool:
-        """该分类的生效状态码是否相对内置默认值被本地配置覆盖。"""
-        return self.status_map[category] != DEFAULT_STATUS_MAP[category]
+        """该分类的生效状态码是否相对内置默认/默认透传行为被本地配置覆盖。"""
+        return category in self._overridden  # type: ignore[attr-defined]
 
     def overridden_categories(self) -> list[ErrorCategory]:
         """所有被本地配置覆盖的分类（按枚举声明顺序），供运行时自查。"""

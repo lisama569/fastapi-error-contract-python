@@ -12,18 +12,38 @@
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
-from app.config import DEFAULT_STATUS_MAP, Settings
+from app.config import (
+    DEFAULT_STATUS_MAP,
+    PASSTHROUGH_CATEGORIES,
+    Settings,
+)
 from app.errors.codes import ErrorCategory
 
 
 class CategoryStatus(BaseModel):
     code: str = Field(..., description="稳定错误分类名", examples=["VALIDATION_BODY"])
-    default_status: int = Field(..., description="内置默认 HTTP 状态码", examples=[422])
-    effective_status: int = Field(
-        ..., description="当前实际生效的 HTTP 状态码", examples=[400]
+    default_status: int | None = Field(
+        ...,
+        description=(
+            "内置默认 HTTP 状态码；状态透传分类（如 CLIENT_ERROR）没有单一"
+            "默认状态、默认保留框架真实状态，此处为 null"
+        ),
+        examples=[422],
+    )
+    effective_status: int | None = Field(
+        ...,
+        description=(
+            "当前实际生效的 HTTP 状态码；状态透传分类未被覆盖时为 null，"
+            "表示默认保留框架给出的真实状态"
+        ),
+        examples=[400],
     )
     overridden: bool = Field(
-        ..., description="生效状态是否相对内置默认值被本地配置覆盖"
+        ..., description="生效状态是否相对内置默认行为被本地配置覆盖"
+    )
+    passthrough: bool = Field(
+        ...,
+        description="是否为状态透传分类：默认保留框架给出的真实状态，仅显式覆盖时改写",
     )
 
 
@@ -49,9 +69,21 @@ def build_introspection_router(settings: Settings) -> APIRouter:
         categories = [
             CategoryStatus(
                 code=category.value,
-                default_status=DEFAULT_STATUS_MAP[category],
-                effective_status=settings.status_for(category),
+                # 透传分类没有单一固定默认状态、默认透传框架真实状态，
+                # default/effective 都以 null 如实展示；仅显式覆盖后才给具体值。
+                default_status=(
+                    None
+                    if category in PASSTHROUGH_CATEGORIES
+                    else DEFAULT_STATUS_MAP[category]
+                ),
+                effective_status=(
+                    settings.status_for(category)
+                    if settings.is_overridden(category)
+                    or category not in PASSTHROUGH_CATEGORIES
+                    else None
+                ),
                 overridden=settings.is_overridden(category),
+                passthrough=category in PASSTHROUGH_CATEGORIES,
             )
             for category in ErrorCategory
         ]

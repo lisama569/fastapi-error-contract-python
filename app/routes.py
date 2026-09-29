@@ -10,10 +10,14 @@ import anyio
 from fastapi import APIRouter, Depends, Header, Path, Query
 from pydantic import BaseModel, Field
 
-from app.dependencies import require_admin, require_json_content_type
+from app.dependencies import (
+    reject_oversized_request,
+    require_admin,
+    require_json_content_type,
+)
 from app.errors.schemas import ErrorResponse
 from app.request_context import get_request_id
-from app.services import create_user, reject_business
+from app.services import create_user, get_user, reject_business
 
 router = APIRouter(tags=["demo"])
 
@@ -23,7 +27,7 @@ _ERROR_REF = {"$ref": "#/components/schemas/ErrorResponse"}
 # 各路由按其实际可能返回的状态码声明错误响应（状态码仅是默认映射，
 # 可通过配置覆盖；文档展示默认值）。
 _COMMON_ERROR_RESPONSES = {
-    404: {"model": ErrorResponse, "description": "路由不存在等资源错误"},
+    404: {"model": ErrorResponse, "description": "业务侧资源不存在（NOT_FOUND）"},
 }
 _VALIDATION_ERROR_RESPONSES = {
     422: {"model": ErrorResponse, "description": "请求校验失败（VALIDATION_*）"},
@@ -39,6 +43,9 @@ _FRAMEWORK_CLIENT_ERROR_RESPONSES = {
     401: {"model": ErrorResponse, "description": "缺少/无效身份凭证（UNAUTHORIZED）"},
     403: {"model": ErrorResponse, "description": "访问被拒绝（FORBIDDEN）"},
     415: {"model": ErrorResponse, "description": "请求体媒体类型不被支持（UNSUPPORTED_MEDIA_TYPE）"},
+}
+_OTHER_FRAMEWORK_CLIENT_ERROR_RESPONSES = {
+    413: {"model": ErrorResponse, "description": "其它框架层 4xx 拒绝（CLIENT_ERROR，保留真实状态）"},
 }
 
 
@@ -70,7 +77,7 @@ async def echo(delay_ms: int = 0) -> dict[str, str]:
 @router.get(
     "/items/{item_id}",
     response_model=dict[str, object],
-    responses={**_COMMON_ERROR_RESPONSES, **_VALIDATION_ERROR_RESPONSES},
+    responses={**_VALIDATION_ERROR_RESPONSES},
 )
 def get_item(
     item_id: Annotated[int, Path(ge=1, description="路径参数：正整数 ID")],
@@ -79,6 +86,19 @@ def get_item(
 ) -> dict[str, object]:
     """演示路径参数与查询参数校验。"""
     return {"item_id": item_id, "q": q, "limit": limit}
+
+
+@router.get(
+    "/users/{user_id}",
+    response_model=UserView,
+    responses={**_COMMON_ERROR_RESPONSES, **_VALIDATION_ERROR_RESPONSES},
+)
+def get_user_by_id(
+    user_id: Annotated[int, Path(ge=1, description="路径参数：正整数用户 ID")],
+) -> UserView:
+    """演示业务侧“数据没查到”：命中业务 NOT_FOUND（默认 404，可单独配置）。"""
+    user = get_user(user_id)
+    return UserView(**user)  # type: ignore[arg-type]
 
 
 @router.post(
@@ -117,6 +137,17 @@ def business_reject(
     """确定性的业务拒绝入口。"""
     reject_business(resource, "演示拒绝")
     return {"status": "ok"}  # pragma: no cover - 不可能到达
+
+
+@router.post(
+    "/too-large",
+    response_model=dict[str, str],
+    responses={**_OTHER_FRAMEWORK_CLIENT_ERROR_RESPONSES},
+    dependencies=[Depends(reject_oversized_request)],
+)
+def too_large() -> dict[str, str]:
+    """演示非具名框架层 4xx：守卫在业务代码前抛 413（CLIENT_ERROR，真实状态保留）。"""
+    return {"status": "ok"}
 
 
 @router.get(

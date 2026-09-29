@@ -42,3 +42,21 @@ async def require_json_content_type(request: Request) -> None:
             status_code=415,
             detail=f"不支持的请求体媒体类型：{media_type or '未声明'}",
         )
+
+
+async def reject_oversized_request(request: Request) -> None:
+    """演示一个“非具名”的框架层 4xx：请求体过大 -> 413。
+
+    它没有专属分类，统一归兜底 ``CLIENT_ERROR``，但响应状态必须保留框架
+    给出的真实 413，且不受业务 ``NOT_FOUND`` 等任何其它分类配置影响。
+    """
+    content_length = request.headers.get("content-length")
+    try:
+        size = int(content_length or 0)
+    except ValueError:
+        size = 0
+    if size > 100:
+        raise StarletteHTTPException(
+            status_code=413,
+            detail="请求体超过演示上限（100 字节）",
+        )

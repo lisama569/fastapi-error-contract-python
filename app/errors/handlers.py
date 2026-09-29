@@ -6,10 +6,12 @@
   保留在 details.loc 中（含完整字段路径与列表下标）；
 - BusinessError：业务拒绝 -> BUSINESS_RULE_VIOLATION（默认 409）；
 - StarletteHTTPException：框架层客户端错误按真实状态码映射到可区分分类——
-  404 路由不存在 -> NOT_FOUND；405 方法不允许 -> METHOD_NOT_ALLOWED；
-  401 -> UNAUTHORIZED；403 -> FORBIDDEN；415 媒体类型不支持 ->
-  UNSUPPORTED_MEDIA_TYPE；其余 4xx 归 NOT_FOUND，5xx 归 INTERNAL_ERROR；
-  对外状态码默认取这些分类的映射（默认值即真实状态），配置可单独覆盖；
+  404 路由不存在 -> ROUTE_NOT_FOUND（区别于业务“资源不存在”的 NOT_FOUND）；
+  405 方法不允许 -> METHOD_NOT_ALLOWED；401 -> UNAUTHORIZED；
+  403 -> FORBIDDEN；415 媒体类型不支持 -> UNSUPPORTED_MEDIA_TYPE；
+  其余 4xx 归兜底分类 CLIENT_ERROR，5xx 归 INTERNAL_ERROR；
+  对外状态码默认保留框架给出的真实状态，仅当命中的那个分类被显式配置覆盖
+  时才改写——覆盖任意分类只影响它自己，绝不波及其它分类或业务 NOT_FOUND；
 - 其它未捕获 Exception：INTERNAL_ERROR（默认 500），仅回传固定文案，
   完整堆栈只写服务端日志并带上 request_id，绝不外泄内部细节。
 
@@ -77,14 +79,20 @@ def _log_failure(
     level: int = logging.INFO,
     detail: str = "",
     exc_info: bool = False,
+    status_code: int | None = None,
 ) -> None:
     """所有失败路径统一落一条可对账日志。
 
-    固定带上 request_id（取当前请求上下文）、最终分类 category 与实际返回
-    状态码 status；客户端凭响应中的 request_id 即可直接反查本条日志。
+    固定带上 request_id（取当前请求上下文）、最终分类 category 与实际写回
+    响应的状态码 status（框架层拒绝显式传入实际值；业务/校验路径取分类映射），
+    客户端凭响应中的 request_id 即可直接反查本条日志。
     并发下 request_id 来自 contextvars，天然只属于当前请求。
     """
-    status = settings.status_for(category)
+    status = (
+        status_code
+        if status_code is not None
+        else settings.status_for(category)
+    )
     request_id = get_request_id()
     suffix = f" detail={detail}" if detail else ""
     logger.log(
@@ -129,13 +137,30 @@ async def validation_exception_handler(
 
 
 # 框架 HTTP 异常真实状态码 -> 稳定分类的确定性映射。
+# 注意：路由未命中的 404 归框架层 ROUTE_NOT_FOUND，业务侧“数据没查到”的
+# NOT_FOUND 只由业务代码经 BusinessError 抛出，两类互不复用。
 _HTTP_STATUS_CATEGORY: dict[int, ErrorCategory] = {
     401: ErrorCategory.UNAUTHORIZED,
     403: ErrorCategory.FORBIDDEN,
-    404: ErrorCategory.NOT_FOUND,
+    404: ErrorCategory.ROUTE_NOT_FOUND,
     405: ErrorCategory.METHOD_NOT_ALLOWED,
     415: ErrorCategory.UNSUPPORTED_MEDIA_TYPE,
 }
+
+
+def _framework_effective_status(
+    exc: StarletteHTTPException, category: ErrorCategory, settings: Settings
+) -> int:
+    """决定一次框架层拒绝最终写回响应的状态码。
+
+    规则：默认保留框架给出的真实状态码（``exc.status_code``）；仅当该分类
+    被本地配置显式覆盖时才改写为覆盖值。未知 4xx 的兜底分类 CLIENT_ERROR
+    默认透传真实状态，业务 NOT_FOUND 等其它分类的配置无论如何都影响不到
+    框架层拒绝。
+    """
+    if settings.is_overridden(category):
+        return settings.status_for(category)
+    return exc.status_code
 
 
 async def http_exception_handler(
@@ -146,22 +171,28 @@ async def http_exception_handler(
         category = (
             ErrorCategory.INTERNAL_ERROR
             if exc.status_code >= 500
-            else ErrorCategory.NOT_FOUND
+            else ErrorCategory.CLIENT_ERROR
         )
     # 框架自带的安全文案（如 "Method Not Allowed"）可以透出；不含堆栈或内部信息。
     message = str(exc.detail) if exc.detail else "请求的资源不存在"
     # 透传框架层语义头（典型为 405 的 Allow: GET, ...），保留真实 HTTP 语义。
     passthrough_headers = dict(getattr(exc, "headers", None) or {})
+    effective_status = _framework_effective_status(exc, category, settings)
     _log_failure(
         category,
         settings,
+        status_code=effective_status,
         detail=(
             f"framework rejection http_status={exc.status_code} "
             f"method={request.method} path={request.url.path}"
         ),
     )
     return build_error_response(
-        category, message, settings, headers=passthrough_headers
+        category,
+        message,
+        settings,
+        headers=passthrough_headers,
+        status_code=effective_status,
     )
 
 

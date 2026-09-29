@@ -76,10 +76,19 @@ def test_status_code_remappable_via_config():
 
 
 def test_not_found_envelope(client):
-    response = client.get("/no-such-path")
+    """业务侧“数据没查到”：NOT_FOUND 分类语义与默认 404 均保持不变。"""
+    response = client.get("/users/999")
     body = response.json()
-    log_case("资源不存在", "/no-such-path", code=body.get("code"),
+    log_case("业务资源不存在", "/users/999", code=body.get("code"),
              request_id=body.get("request_id"), status=response.status_code)
     assert response.status_code == 404
     assert body["code"] == "NOT_FOUND"
     assert body["details"] is None
+    assert response.headers["X-Request-ID"] == body["request_id"]
+
+
+def test_known_business_resource_succeeds(client):
+    """已存在的业务数据正常返回，结构与既有成功响应兼容。"""
+    response = client.get("/users/1")
+    assert response.status_code == 200
+    assert response.json() == {"id": 1, "name": "demo-user", "age": 30}

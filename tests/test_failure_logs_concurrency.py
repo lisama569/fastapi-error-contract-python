@@ -65,9 +65,29 @@ async def test_concurrent_failure_logs_never_cross_wires(caplog):
         plan.append(("BUSINESS_RULE_VIOLATION", "POST", "/business-reject",
                      {"headers": {"X-Request-ID": rid}}))
     for i in range(6):
+        rid = f"trace-biz-missing-{i}"
+        # 业务侧“数据没查到”：与框架路由 404 是不同分类。
+        plan.append(("NOT_FOUND", "GET", "/users/999",
+                     {"headers": {"X-Request-ID": rid}}))
+    for i in range(6):
+        rid = f"trace-route-missing-{i}"
+        # 框架层“地址写错”：默认 404、分类 ROUTE_NOT_FOUND。
+        plan.append(("ROUTE_NOT_FOUND", "GET", "/no-such-path",
+                     {"headers": {"X-Request-ID": rid}}))
+    for i in range(6):
         rid = f"trace-framework-{i}"
         plan.append(("METHOD_NOT_ALLOWED", "POST", "/items/1",
                      {"headers": {"X-Request-ID": rid}}))
+    for i in range(6):
+        rid = f"trace-other-4xx-{i}"
+        # 非具名框架 4xx：413 透传，分类 CLIENT_ERROR。
+        plan.append((
+            "CLIENT_ERROR", "POST", "/too-large",
+            {
+                "headers": {"X-Request-ID": rid, "Content-Length": "101"},
+                "content": b"x" * 101,
+            },
+        ))
     for i in range(6):
         rid = f"trace-boom-{i}"
         plan.append(("INTERNAL_ERROR", "GET", "/boom",

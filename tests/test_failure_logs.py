@@ -62,19 +62,88 @@ def test_framework_rejection_log_carries_tracking_fields(client, caplog):
             content=b"x",
             headers={"Content-Type": "text/plain"},
         )
+        r413 = client.post(
+            "/too-large",
+            headers={"Content-Length": "101"},
+            content=b"x" * 101,
+        )
+        r_biz_not_found = client.get("/users/999")
     expected = [
-        (r404, "NOT_FOUND", 404),
-        (r405, "METHOD_NOT_ALLOWED", 405),
-        (r401, "UNAUTHORIZED", 401),
-        (r403, "FORBIDDEN", 403),
-        (r415, "UNSUPPORTED_MEDIA_TYPE", 415),
+        (r404, "ROUTE_NOT_FOUND", 404, 404),
+        (r405, "METHOD_NOT_ALLOWED", 405, 405),
+        (r401, "UNAUTHORIZED", 401, 401),
+        (r403, "FORBIDDEN", 403, 403),
+        (r415, "UNSUPPORTED_MEDIA_TYPE", 415, 415),
+        (r413, "CLIENT_ERROR", 413, 413),
+        # 业务“资源不存在”是独立分类，与框架 404 各记各的日志。
+        (r_biz_not_found, "NOT_FOUND", 404, None),
     ]
     records = _failure_records(caplog)
     assert len(records) == len(expected)
-    for record, (response, category, status) in zip(records, expected):
+    for record, (response, category, status, original_http_status) in zip(
+        records, expected
+    ):
         _assert_failure_log(
             record, response.json()["request_id"], category, status
         )
+        # 同一次请求日志里的分类/状态必须与客户端真正收到的一致。
+        assert response.json()["code"] == category
+        assert response.status_code == status
+        if original_http_status is not None:
+            # 框架层拒绝还必须能从日志看出框架原本给出的真实状态。
+            assert f"http_status={original_http_status}" in record.getMessage()
+
+
+def test_framework_log_matches_response_under_category_override(caplog):
+    """覆盖框架分类状态后：日志 status=客户端真实收到的状态，http_status 仍留原值。"""
+    from fastapi.testclient import TestClient
+
+    from app.config import build_settings
+    from app.errors.codes import ErrorCategory
+    from app.main import create_app
+
+    settings = build_settings({ErrorCategory.ROUTE_NOT_FOUND: 410})
+    app = create_app(settings)
+    with TestClient(app, raise_server_exceptions=False) as c:
+        with caplog.at_level(logging.INFO, logger="app.errors"):
+            response = c.get(
+                "/no-such-path", headers={"X-Request-ID": "trace-route-410"}
+            )
+    assert response.status_code == 410
+    assert response.headers["X-Request-ID"] == "trace-route-410"
+    records = _failure_records(caplog)
+    assert len(records) == 1
+    message = records[0].getMessage()
+    # 拿客户端给的请求标识查到的必须就是这次请求。
+    assert "request_id=trace-route-410" in message
+    assert "category=ROUTE_NOT_FOUND" in message
+    # 日志里的 status 必须等于客户端实际收到的 410……
+    assert "status=410" in message
+    # ……同时仍能看出框架原本给的是 404。
+    assert "http_status=404" in message
+
+
+def test_business_not_found_log_is_independent_from_route_log(client, caplog):
+    """业务 NOT_FOUND 与框架 ROUTE_NOT_FOUND 各落一条，互不冒用。"""
+    with caplog.at_level(logging.INFO, logger="app.errors"):
+        biz = client.get(
+            "/users/999", headers={"X-Request-ID": "trace-biz-miss"}
+        )
+        route = client.get(
+            "/no-such-path", headers={"X-Request-ID": "trace-route-miss"}
+        )
+    assert biz.json()["code"] == "NOT_FOUND"
+    assert route.json()["code"] == "ROUTE_NOT_FOUND"
+    messages = [r.getMessage() for r in _failure_records(caplog)]
+    joined = "\n".join(messages)
+    assert "request_id=trace-biz-miss category=NOT_FOUND status=404" in joined
+    assert (
+        "request_id=trace-route-miss category=ROUTE_NOT_FOUND status=404"
+        in joined
+    )
+    # 每条请求只对应自己那一条日志。
+    assert sum("trace-biz-miss" in m for m in messages) == 1
+    assert sum("trace-route-miss" in m for m in messages) == 1
 
 
 def test_unhandled_exception_log_carries_tracking_fields_and_stack(client, caplog):

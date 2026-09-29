@@ -32,9 +32,14 @@ def test_introspection_lists_all_categories_with_real_defaults(client):
     indexed = _index(body)
     for category in ErrorCategory:
         entry = indexed[category.value]
-        assert entry["default_status"] == DEFAULT_STATUS_MAP[category]
-        assert entry["effective_status"] == DEFAULT_STATUS_MAP[category]
         assert entry["overridden"] is False
+        if entry["passthrough"]:
+            # 透传分类没有单一默认/生效状态，均以 null 如实展示。
+            assert entry["default_status"] is None
+            assert entry["effective_status"] is None
+        else:
+            assert entry["default_status"] == DEFAULT_STATUS_MAP[category]
+            assert entry["effective_status"] == DEFAULT_STATUS_MAP[category]
 
 
 def test_introspection_reflects_config_overrides():
@@ -86,9 +91,10 @@ def test_introspection_matches_openapi_and_runtime_default_requests(client):
     body = client.get("/meta/error-contract").json()
     indexed = _index(body)
 
-    # 抽样：自查默认状态 == 实际请求状态。
+    # 抽样：自查默认状态 == 实际请求状态（透传分类除外，其默认保留真实状态）。
     runtime = {
-        "NOT_FOUND": client.get("/no-such-path").status_code,
+        "ROUTE_NOT_FOUND": client.get("/no-such-path").status_code,
+        "NOT_FOUND": client.get("/users/999").status_code,
         "METHOD_NOT_ALLOWED": client.post("/items/1").status_code,
         "UNAUTHORIZED": client.get("/admin").status_code,
         "UNSUPPORTED_MEDIA_TYPE": client.post(
@@ -98,4 +104,15 @@ def test_introspection_matches_openapi_and_runtime_default_requests(client):
         ).status_code,
     }
     for code, status in runtime.items():
-        assert indexed[code]["effective_status"] == status == indexed[code]["default_status"]
+        assert indexed[code]["effective_status"] == status
+    # 透传分类 CLIENT_ERROR：真实请求保留框架状态（413），自查标记为透传。
+    other_4xx = client.post(
+        "/too-large",
+        headers={"Content-Length": "101"},
+        content=b"x" * 101,
+    )
+    assert other_4xx.status_code == 413
+    client_entry = indexed["CLIENT_ERROR"]
+    assert client_entry["passthrough"] is True
+    assert client_entry["default_status"] is None
+    assert client_entry["overridden"] is False
